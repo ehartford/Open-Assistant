@@ -43,6 +43,8 @@ def custom_json_deserializer(s):
             return chat_schema.CreateMessageRequest.parse_obj(d)
         case "WorkRequest":
             return inference.WorkRequest.parse_obj(d)
+        case "PluginUsed":
+            return inference.PluginUsed.parse_obj(d)
         case None:
             return d
         case _:
@@ -73,6 +75,7 @@ async def get_async_session(autoflush=True):
 
 
 def alembic_upgrade(connection):
+    """Upgrades database schema based on Alembic migration scripts."""
     alembic_ini_path = Path(__file__).parent.parent / "alembic.ini"
     alembic_cfg = alembic.config.Config(str(alembic_ini_path))
     alembic_cfg.set_main_option("sqlalchemy.url", settings.database_uri)

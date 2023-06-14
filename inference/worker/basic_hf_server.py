@@ -1,10 +1,14 @@
-# a basic fastapi server to run generation on HF models
+"""
+Basic FastAPI server to serve models using HuggingFace Transformers library.
+This is an alternative to running the HuggingFace `text-generation-inference` (tgi) server.
+"""
 
 import sys
 import threading
 from queue import Queue
 
 import fastapi
+import hf_stopping
 import hf_streamer
 import interface
 import torch
@@ -47,6 +51,7 @@ model_input_queue: Queue = Queue()
 
 
 def model_thread():
+    """Continually obtain new work requests from the model input queue and work on them."""
     model: transformers.PreTrainedModel
     tokenizer: transformers.PreTrainedTokenizer
     model, tokenizer, decode_token = load_models()
@@ -60,8 +65,12 @@ def model_thread():
             prompt = request.inputs
             params = request.parameters.dict()
             seed = params.pop("seed")
-            params.pop("stop")
+            stop_sequences = params.pop("stop")
             params.pop("details")
+            params.pop("plugins")
+
+            if seed is not None:
+                torch.manual_seed(seed)
 
             last_token_id = None  # need to delay by 1 to simulate tgi
 
@@ -79,7 +88,20 @@ def model_thread():
                 ids = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=False)
                 streamer = hf_streamer.HFStreamer(input_ids=ids, printer=print_text)
                 ids = ids.to(model.device)
-                output = model.generate(ids, **params, streamer=streamer, eos_token_id=eos_token_id)
+                stopping_criteria = (
+                    transformers.StoppingCriteriaList(
+                        [hf_stopping.SequenceStoppingCriteria(tokenizer, stop_sequences, prompt)]
+                    )
+                    if stop_sequences
+                    else None
+                )
+                output = model.generate(
+                    ids,
+                    **params,
+                    streamer=streamer,
+                    eos_token_id=eos_token_id,
+                    stopping_criteria=stopping_criteria,
+                )
                 output = output.cpu()
                 output_ids = output[0][len(ids[0]) :]
                 decoded = tokenizer.decode(output_ids, skip_special_tokens=True)
@@ -130,7 +152,7 @@ def load_models():
         return result[special_decode_token_length:]
 
     config_dtype = hf_config.torch_dtype if hasattr(hf_config, "torch_dtype") else torch.float32
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else config_dtype
+    dtype = torch.bfloat16 if torch.has_cuda and torch.cuda.is_bf16_supported() else config_dtype
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_config.model_id,

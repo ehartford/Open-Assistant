@@ -1,23 +1,24 @@
 import "simplebar-react/dist/simplebar.min.css";
 
-import { Box, CardProps } from "@chakra-ui/react";
+import { Box, CardProps, Flex } from "@chakra-ui/react";
 import { Plus } from "lucide-react";
 import { useTranslation } from "next-i18next";
-import { memo, useCallback } from "react";
+import { memo, useCallback, useState } from "react";
 import SimpleBar from "simplebar-react";
-import { GetChatsResponse } from "src/types/Chat";
 
 import { ChatListItem } from "./ChatListItem";
-import { ChatWarning } from "./ChatWarning";
+import { ChatViewSelection } from "./ChatViewSelection";
 import { CreateChatButton } from "./CreateChatButton";
 import { InferencePoweredBy } from "./InferencePoweredBy";
-import { useListChatPagination } from "./useListChatPagination";
+import { ChatListViewSelection, useListChatPagination } from "./useListChatPagination";
 
 export const ChatListBase = memo(function ChatListBase({
-  initialChats, // TODO: can we remove this?
+  allowViews,
+  noScrollbar,
   ...props
-}: CardProps & { initialChats?: GetChatsResponse }) {
-  const { loadMoreRef, responses, mutateChatResponses } = useListChatPagination(initialChats);
+}: CardProps & { allowViews?: boolean; noScrollbar?: boolean }) {
+  const [view, setView] = useState<ChatListViewSelection>("visible");
+  const { loadMoreRef, responses, mutateChatResponses } = useListChatPagination(view);
   const chats = responses?.flatMap((response) => response.chats) || [];
 
   const { t } = useTranslation(["common", "chat"]);
@@ -45,7 +46,7 @@ export const ChatListBase = memo(function ChatListBase({
     [mutateChatResponses]
   );
 
-  const handleHide = useCallback(
+  const removeItemFromList = useCallback(
     ({ chatId }: { chatId: string }) => {
       mutateChatResponses(
         (chatResponses) => [
@@ -66,6 +67,21 @@ export const ChatListBase = memo(function ChatListBase({
     mutateChatResponses();
   }, [mutateChatResponses]);
 
+  const content = (
+    <>
+      {chats.map((chat) => (
+        <ChatListItem
+          key={chat.id}
+          chat={chat}
+          onUpdateTitle={handleUpdateTitle}
+          onHide={removeItemFromList}
+          onDelete={removeItemFromList}
+        />
+      ))}
+      <div ref={loadMoreRef} />
+    </>
+  );
+
   return (
     <Box
       gap="1"
@@ -79,31 +95,34 @@ export const ChatListBase = memo(function ChatListBase({
       }}
       {...props}
     >
-      <CreateChatButton
-        py="5"
-        leftIcon={<Plus size="16px"></Plus>}
-        variant="outline"
-        justifyContent="start"
-        colorScheme="blue"
-        borderRadius="lg"
-        mx="3"
-        mb="2"
-        onUpdated={handleCreateChat}
-      >
-        {t("create_chat")}
-      </CreateChatButton>
-      <SimpleBar
-        style={{ padding: "4px 0", maxHeight: "100%", height: "100%", minHeight: "0" }}
-        classNames={{
-          contentEl: "space-y-2 mx-3 flex flex-col overflow-y-auto",
-        }}
-      >
-        {chats.map((chat) => (
-          <ChatListItem key={chat.id} chat={chat} onUpdateTitle={handleUpdateTitle} onHide={handleHide} />
-        ))}
-        <div ref={loadMoreRef} />
-      </SimpleBar>
-      <ChatWarning />
+      <Flex flexDirection={["column", "row"]} alignItems="stretch" p="2" gap="3">
+        <CreateChatButton
+          leftIcon={<Plus size="16px" />}
+          variant="outline"
+          justifyContent="start"
+          colorScheme="blue"
+          borderRadius="lg"
+          onUpdated={handleCreateChat}
+          flexGrow="1"
+        >
+          {t("create_chat")}
+        </CreateChatButton>
+        {allowViews && (
+          <ChatViewSelection w={["full", "auto"]} onChange={(e) => setView(e.target.value as ChatListViewSelection)} />
+        )}
+      </Flex>
+      {noScrollbar ? (
+        content
+      ) : (
+        <SimpleBar
+          style={{ padding: "8px", height: "100%", minHeight: "150px" }}
+          classNames={{
+            contentEl: "flex flex-col items-center overflow-y-hidden min-h-full",
+          }}
+        >
+          {content}
+        </SimpleBar>
+      )}
       <InferencePoweredBy />
     </Box>
   );

@@ -27,7 +27,7 @@ from trlx.utils import Clock
 from trlx.utils.modeling import logprobs_of_labels
 from utils.utils import get_model
 
-from .utils import prepare_tensor
+from .utils_rl import prepare_tensor
 
 logger = logging.get_logger(__name__)
 
@@ -553,7 +553,7 @@ def triton_server_ref_model():  # noqa:  C901
         for i in range(math.ceil(len(all_tokens) / mbs)):
             batch_ixs = slice(i * mbs, (i + 1) * mbs)
 
-            # We specififed int32 as types for a triton client
+            # We specified int32 as types for a triton client
             result = client.infer(
                 triton_model,
                 [

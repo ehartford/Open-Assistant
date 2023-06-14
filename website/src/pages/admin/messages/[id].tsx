@@ -4,26 +4,25 @@ import {
   CardHeader,
   CircularProgress,
   Grid,
-  Text,
-  TableContainer,
   Table,
   TableCaption,
-  Thead,
-  Tr,
-  Th,
+  TableContainer,
   Tbody,
   Td,
+  Th,
+  Thead,
+  Tr,
 } from "@chakra-ui/react";
-import { GetServerSideProps } from "next";
 import Head from "next/head";
 import { useRouter } from "next/router";
-import { serverSideTranslations } from "next-i18next/serverSideTranslations";
+export { getServerSideProps } from "src/lib/defaultServerSideProps";
 import { AdminArea } from "src/components/AdminArea";
 import { JsonCard } from "src/components/JsonCard";
-import { getAdminLayout } from "src/components/Layout";
+import { AdminLayout } from "src/components/Layout";
+import { MessageHistoryTable } from "src/components/Messages/MessageHistoryTable";
 import { MessageTree } from "src/components/Messages/MessageTree";
 import { get } from "src/lib/api";
-import { Message, MessageWithChildren } from "src/types/Conversation";
+import { Message, MessageRevision, MessageWithChildren } from "src/types/Conversation";
 import useSWRImmutable from "swr/immutable";
 
 const MessageDetail = () => {
@@ -41,7 +40,14 @@ const MessageDetail = () => {
       max_depth: number;
       origin: string;
     };
-  }>(`/api/admin/messages/${messageId}/tree`, get);
+  }>(`/api/admin/messages/${messageId}/tree`, get, {
+    keepPreviousData: true,
+  });
+  const {
+    data: revisions,
+    isLoading: revisionsLoading,
+    error: revisionError,
+  } = useSWRImmutable<MessageRevision[]>(`/api/admin/messages/${messageId}/history`, get, { keepPreviousData: true });
 
   return (
     <>
@@ -49,9 +55,12 @@ const MessageDetail = () => {
         <title>Open Assistant</title>
       </Head>
       <AdminArea>
-        {isLoading && <CircularProgress isIndeterminate></CircularProgress>}
+        {(isLoading && !data) ||
+          (revisionsLoading && !revisions && <CircularProgress isIndeterminate></CircularProgress>)}
         {error && "Unable to load message tree"}
+        {revisionError && "Unable to load message revision history"}
         {data &&
+          revisions &&
           (data.tree === null ? (
             "Unable to build tree"
           ) : (
@@ -62,6 +71,14 @@ const MessageDetail = () => {
                 </CardHeader>
                 <CardBody>
                   <JsonCard>{data.message}</JsonCard>
+                </CardBody>
+              </Card>
+              <Card>
+                <CardHeader fontWeight="bold" fontSize="xl" pb="0">
+                  Message History
+                </CardHeader>
+                <CardBody>
+                  <MessageHistoryTable message={data?.message} revisions={revisions} />
                 </CardBody>
               </Card>
               <Card>
@@ -118,14 +135,6 @@ const MessageDetail = () => {
   );
 };
 
-MessageDetail.getLayout = getAdminLayout;
+MessageDetail.getLayout = AdminLayout;
 
 export default MessageDetail;
-
-export const getServerSideProps: GetServerSideProps = async ({ locale = "en" }) => {
-  return {
-    props: {
-      ...(await serverSideTranslations(locale, ["common", "labelling", "message"])),
-    },
-  };
-};

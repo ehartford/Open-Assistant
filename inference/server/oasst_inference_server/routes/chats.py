@@ -110,6 +110,8 @@ async def create_prompter_message(
                 chat_id=chat_id, parent_id=request.parent_id, content=request.content
             )
         return prompter_message.to_read()
+    except fastapi.HTTPException:
+        raise
     except Exception:
         logger.exception("Error adding prompter message")
         return fastapi.Response(status_code=500)
@@ -138,6 +140,9 @@ async def create_assistant_message(
             work_parameters = inference.WorkParameters(
                 model_config=model_config,
                 sampling_parameters=request.sampling_parameters,
+                system_prompt=request.system_prompt,
+                plugins=request.plugins,
+                plugin_max_depth=settings.plugin_max_depth,
             )
             assistant_message = await ucr.initiate_assistant_message(
                 parent_id=request.parent_id,
@@ -154,6 +159,8 @@ async def create_assistant_message(
             status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="The server is currently busy. Please try again later.",
         )
+    except fastapi.HTTPException:
+        raise
     except Exception:
         logger.exception("Error adding prompter message")
         return fastapi.Response(status_code=500)
@@ -230,6 +237,25 @@ async def message_events(
                     )
                     break
 
+                if response_packet.response_type == "safe_prompt":
+                    logger.info(f"Received safety intervention for {chat_id}")
+                    yield {
+                        "data": chat_schema.SafePromptResponseEvent(
+                            safe_prompt=response_packet.safe_prompt,
+                        ).json(),
+                    }
+
+                if response_packet.response_type == "plugin_intermediate":
+                    logger.info(f"Received plugin intermediate response {chat_id}")
+                    yield {
+                        "data": chat_schema.PluginIntermediateResponseEvent(
+                            current_plugin_thought=response_packet.current_plugin_thought,
+                            current_plugin_action_taken=response_packet.current_plugin_action_taken,
+                            current_plugin_action_input=response_packet.current_plugin_action_input,
+                            current_plugin_action_response=response_packet.current_plugin_action_response,
+                        ).json(),
+                    }
+
                 if response_packet.response_type == "internal_error":
                     yield {
                         "data": chat_schema.ErrorResponseEvent(
@@ -278,6 +304,22 @@ async def handle_create_vote(
         return fastapi.Response(status_code=500)
 
 
+@router.post("/{chat_id}/messages/{message_id}/message_evals")
+async def handle_create_message_eval(
+    message_id: str,
+    inferior_message_request: chat_schema.MessageEvalRequest,
+    ucr: deps.UserChatRepository = fastapi.Depends(deps.create_user_chat_repository),
+) -> fastapi.Response:
+    try:
+        await ucr.add_message_eval(
+            message_id=message_id, inferior_message_ids=inferior_message_request.inferior_message_ids
+        )
+        return fastapi.Response(status_code=200)
+    except Exception:
+        logger.exception("Error setting messages as inferior")
+        return fastapi.Response(status_code=500)
+
+
 @router.post("/{chat_id}/messages/{message_id}/reports")
 async def handle_create_report(
     message_id: str,
@@ -307,7 +349,21 @@ async def handle_update_chat(
             chat_id=chat_id,
             title=request.title,
             hidden=request.hidden,
+            allow_data_use=request.allow_data_use,
+            active_thread_tail_message_id=request.active_thread_tail_message_id,
         )
     except Exception:
         logger.exception("Error when updating chat")
+        return fastapi.Response(status_code=500)
+
+
+@router.put("/hide_all")
+async def handle_hide_all_chats(
+    ucr: deps.UserChatRepository = fastapi.Depends(deps.create_user_chat_repository),
+) -> fastapi.Response:
+    """Allows the client to hide all the user's chats."""
+    try:
+        await ucr.hide_all_chats()
+    except Exception:
+        logger.exception("Error when hiding chats")
         return fastapi.Response(status_code=500)

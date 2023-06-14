@@ -1,9 +1,18 @@
-from oasst_data.reader import read_message_list, read_message_tree_list, read_message_trees, read_messages
+from oasst_data.reader import (
+    read_dataset_message_trees,
+    read_dataset_messages,
+    read_message_list,
+    read_message_tree_list,
+    read_message_trees,
+    read_messages,
+)
 from oasst_data.schemas import (
     ExportMessageEvent,
     ExportMessageEventEmoji,
     ExportMessageEventRanking,
     ExportMessageEventRating,
+    ExportMessageEventReport,
+    ExportMessageEventScore,
     ExportMessageNode,
     ExportMessageTree,
     LabelAvgValue,
@@ -19,6 +28,8 @@ __all__ = [
     "ExportMessageEventEmoji",
     "ExportMessageEventRating",
     "ExportMessageEventRanking",
+    "ExportMessageEventReport",
+    "ExportMessageEventScore",
     "ExportMessageNode",
     "ExportMessageTree",
     "read_message_trees",
@@ -29,4 +40,6 @@ __all__ = [
     "visit_messages_depth_first",
     "write_message_trees",
     "write_messages",
+    "read_dataset_message_trees",
+    "read_dataset_messages",
 ]

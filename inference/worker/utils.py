@@ -8,12 +8,26 @@ import interface
 import lorem
 import pydantic
 import requests
+import sseclient
+import transformers
 import websocket
+from chat_chain_prompts import V2_PROMPTER_PREFIX, V2_SYSTEM_PREFIX
 from loguru import logger
 from oasst_shared.schemas import inference
+from settings import settings
+
+shared_tokenizer_lock = threading.Lock()
 
 
 class TokenBuffer:
+    """
+    A buffer for storing and managing tokens based on various conditions including stop sequences.
+
+    The TokenBuffer class accumulates tokens while keeping track of the length and manages the tokens based on the stop
+    sequences provided during initialization. Tokens can be added to the buffer and later on iterated upon finishing
+    depending on the reason.
+    """
+
     def __init__(self, stop_sequences: list[str]) -> None:
         self.stop_sequences = stop_sequences
         self.longest_stop_len = max((len(stop) for stop in stop_sequences), default=1)
@@ -58,7 +72,74 @@ class TokenBuffer:
             yield from self.tokens
 
 
+def get_max_input_length(worker_config: inference.WorkerConfig, plugin_used: bool):
+    """Get the maximum possible input length based on the worker config and whether a plugin is in use."""
+    max_input_length = worker_config.model_config.max_input_length
+    if plugin_used:
+        max_input_length = max_input_length - 1
+    return max_input_length
+
+
+def truncate_prompt(
+    tokenizer: transformers.PreTrainedTokenizer,
+    worker_config: inference.WorkerConfig,
+    parameters: interface.GenerateStreamParameters,
+    prompt: str,
+    plugin_used: bool,
+):
+    """
+    Truncate a prompt to ensure it does not exceed the maximum input length. Regardless of truncation, the system
+    prompt is always retained if it is present. If truncation removes the final prompter prefix, a new one is added.
+
+    The stream generation parameters are also updated with a maximum new tokens value which will not cause the total
+    length to exceed the maximum specified in the worker's model config.
+    """
+    with shared_tokenizer_lock:
+        ids = tokenizer.encode(prompt)
+        prompter_prefix_id = tokenizer.convert_tokens_to_ids(V2_PROMPTER_PREFIX)
+
+    system_prompt: str | None = None
+    system_tokens: list[int] | None = None
+    if prompt.startswith(V2_SYSTEM_PREFIX):
+        system_prompt = prompt[: prompt.index(V2_PROMPTER_PREFIX)]
+        system_tokens = ids[: ids.index(prompter_prefix_id)]
+
+    max_input_length = get_max_input_length(worker_config, plugin_used)
+
+    if len(ids) > max_input_length:
+        logger.debug(f"Prompt too long, left-truncating to {max_input_length} tokens")
+
+        num_system_tokens = len(system_tokens) if system_tokens else 0
+        # Maximum token allowed for the conversation, ex system prompt
+        max_conversation_length = max_input_length - num_system_tokens
+        ids = ids[-(max_conversation_length - 1) :]
+
+        with shared_tokenizer_lock:
+            prompt = tokenizer.decode(ids)
+
+            if V2_PROMPTER_PREFIX not in prompt:
+                prompt = V2_PROMPTER_PREFIX + prompt
+                ids = tokenizer.encode(V2_PROMPTER_PREFIX) + ids
+
+            if system_tokens:
+                prompt = system_prompt + prompt
+                ids = system_tokens + ids
+
+    max_total_tokens = worker_config.model_config.max_total_length
+    input_length = len(ids)
+    spare = max_total_tokens - input_length - 1
+
+    if not parameters.max_new_tokens:
+        parameters.max_new_tokens = spare
+    elif parameters.max_new_tokens > spare:
+        logger.debug(f"Max new tokens too high, reducing to {spare}")
+        parameters.max_new_tokens = spare
+
+    return prompt
+
+
 def wait_for_inference_server(http: "HttpClient", timeout: int = 600):
+    """Wait for the "health" endpoint of the inference server to return status 200."""
     time_limit = time.time() + timeout
     while True:
         try:
@@ -75,7 +156,13 @@ def wait_for_inference_server(http: "HttpClient", timeout: int = 600):
             break
 
 
-def text_to_events(text: str, seed: int | None = None, pause: float = 0.0):
+def text_to_events(
+    text: str, seed: int | None = None, pause: float = 0.0
+) -> Iterable[interface.GenerateStreamResponse]:
+    """
+    Iterate over stream generation "events" derived from the given text, where each word in the text is treated as a
+    generated "token".
+    """
     tokens = text.split()
     for token in tokens[:-1]:
         yield interface.GenerateStreamResponse(
@@ -103,9 +190,8 @@ def text_to_events(text: str, seed: int | None = None, pause: float = 0.0):
 
 
 def lorem_events(seed):
-    sentence = lorem.sentence()
-    time.sleep(1)
-    yield from text_to_events(sentence, seed=seed, pause=0.5)
+    sentence = lorem.paragraph()
+    yield from text_to_events(sentence, seed=seed, pause=0.2)
 
 
 ws_lock = threading.Lock()
@@ -113,27 +199,74 @@ ws_lock = threading.Lock()
 
 def send_response(
     ws: websocket.WebSocket,
-    repsonse: inference.WorkerResponse | inference.WorkerInfo,
+    response: inference.WorkerResponse | inference.WorkerInfo,
 ):
-    msg = repsonse.json()
+    msg = response.json()
     with ws_lock:
         ws.send(msg)
 
 
 class HttpClient(pydantic.BaseModel):
+    """Basic HTTP client built around `requests`. Supports simple authentication."""
+
     base_url: str
     basic_auth_username: str | None = None
     basic_auth_password: str | None = None
+    bearer_token: str | None = None
 
     @property
     def auth(self):
         if self.basic_auth_username and self.basic_auth_password:
-            return (self.basic_auth_username, self.basic_auth_password)
+            return self.basic_auth_username, self.basic_auth_password
         else:
             return None
 
+    def _maybe_add_bearer_token(self, headers: dict[str, str] | None):
+        if self.bearer_token:
+            if headers is None:
+                headers = {}
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        return headers
+
     def get(self, path: str, **kwargs):
+        kwargs["headers"] = self._maybe_add_bearer_token(kwargs.get("headers"))
         return requests.get(self.base_url + path, auth=self.auth, **kwargs)
 
     def post(self, path: str, **kwargs):
+        kwargs["headers"] = self._maybe_add_bearer_token(kwargs.get("headers"))
         return requests.post(self.base_url + path, auth=self.auth, **kwargs)
+
+
+def get_inference_server_stream_events(
+    request: interface.GenerateStreamRequest,
+) -> Iterable[interface.GenerateStreamResponse]:
+    """Query the model inference server specified in the worker settings and stream the generation events."""
+    http = HttpClient(
+        base_url=settings.inference_server_url,
+        basic_auth_username=settings.basic_auth_username,
+        basic_auth_password=settings.basic_auth_password,
+        bearer_token=settings.bearer_token,
+    )
+    response = http.post(
+        settings.inference_server_route,
+        json=request.dict(),
+        stream=True,
+        headers={"Accept": "text/event-stream"},
+    )
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        logger.exception("Failed to get response from inference server")
+        logger.error(f"Response: {response.text}")
+        raise
+
+    client = sseclient.SSEClient(response)
+    for event in client.events():
+        if event.event == "error":
+            logger.error(f"Error from inference server: {event.data}")
+            yield interface.GenerateStreamResponse(error=event.data)
+            raise RuntimeError(f"Error from inference server: {event.data}")
+        if event.event == "ping":
+            continue
+        stream_response = interface.GenerateStreamResponse.parse_raw(event.data)
+        yield stream_response

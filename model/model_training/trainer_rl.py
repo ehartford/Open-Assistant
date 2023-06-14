@@ -17,7 +17,8 @@ from trlx.data.configs import TRLConfig
 
 # flake8: noqa
 from utils.ppo_utils import CustomPPOTrainer
-from utils.utils import _strtobool, get_dataset, get_model, init_rng, prepare_tensor, read_yamls
+from utils.utils import _strtobool, get_dataset, get_model, init_rng, read_yamls
+from utils.utils_rl import prepare_tensor
 
 
 def argument_parsing(notebook=False, notebook_args=None, **kwargs):
@@ -88,7 +89,7 @@ def create_reward_fn(rank_config, sft_config):  # noqa:  C901
         for i in range(math.ceil(len(samples) / mbs)):
             batch_ixs = slice(i * mbs, (i + 1) * mbs)
 
-            # We specififed int32 as types for a triton client
+            # We specified int32 as types for a triton client
             result = client.infer(
                 triton_model,
                 [
